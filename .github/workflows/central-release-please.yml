@@ -1,158 +1,74 @@
-name: Central PR Guard
+name: Central Release Please
 
 on:
   workflow_call:
     inputs:
-      check_ef_migrations:
-        description: 'EF Core Migration kontrolü yapılsın mı?'
-        required: false
-        type: boolean
-        default: false
-      migrations_path:
-        description: 'EF Core Migrations klasör yolu'
+      release_type:
+        description: 'Release Please stratejisi (simple veya node)'
+        required: true
+        type: string
+      target_branch:
+        description: 'Sürüm çıkarılacak hedef dal'
         required: false
         type: string
-        default: ''
+        default: 'production'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
-  pr-policy-check:
-    name: PR Başlık ve Şablon Kontrolü
-    if: github.event.action != 'closed'
+  release-please:
+    name: Release Please (${{ inputs.release_type }})
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-      - name: 1. Release Please Bot PR'larını Atla
-        if: startsWith(github.head_ref, 'release-please--')
-        run: echo "Release Please PR'ı doğrulamadan muaf."
-
-      - name: 2. Conventional Commit PR Başlığı Kontrolü (development için)
-        id: title_check
-        if: github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
-        uses: amannn/action-semantic-pull-request@v5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 1. GitHub App Token Üret (cibik-release-bot)
+        id: app-token
+        uses: actions/create-github-app-token@v1
         with:
-          types: |
-            feat
-            fix
-            perf
-            refactor
-            docs
-            test
-            build
-            ci
-            chore
-            revert
-          requireScope: false
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
-      - name: 3. PR Şablonu (Body) Kontrolü
-        id: body_check
-        if: github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          if ! echo "$PR_BODY" | grep -q "## Özet"; then
-            echo "❌ HATA: Lütfen PR şablonundaki '## Özet' bölümünü silmeden doldurun!"
-            exit 1
-          fi
-          if ! echo "$PR_BODY" | grep -q "## Risk ve Geri Alma Planı"; then
-            echo "❌ HATA: Lütfen PR şablonundaki '## Risk ve Geri Alma Planı' bölümünü silmeden doldurun!"
-            exit 1
-          fi
-          echo "✅ PR şablonu eksiksiz."
-
-      - name: 4. Hata Varsa PR'ı Draft Yap (Merge Butonunu Kilitle)
-        if: failure() && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "🔒 Kontroller başarısız olduğu için PR taslak (Draft) moduna alınıyor ve merge kilitleniyor..."
-          gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} --undo || true
-
-      - name: 5. Kontroller Geçtiyse Kilidi Aç (Ready for Review)
-        if: success() && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${{ github.event.pull_request.draft }}" == "true" ]; then
-            echo "🔓 Tüm kontroller başarılı! PR kilidi açılıyor..."
-            gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} || true
-          fi
-
-      - name: 6. Merge Yöntemi Rehberi
-        if: always()
-        run: |
-          if [ "${{ github.base_ref }}" == "development" ]; then
-            echo "### 🟢 Hedef Dal: \`development\`" >> $GITHUB_STEP_SUMMARY
-            echo "Lütfen birleştirirken **Squash and merge** butonunu kullanın!" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### 🟠 Hedef Dal: \`${{ github.base_ref }}\` (Ortam Geçişi)" >> $GITHUB_STEP_SUMMARY
-            echo "Sürüm geçmişinin (feat/fix) kaybolmaması için lütfen **Create a merge commit** butonunu kullanın! **KESİNLİKLE SQUASH YAPMAYIN!**" >> $GITHUB_STEP_SUMMARY
-          fi
-
-  ef-migration-guard:
-    name: EF Core Immutable Migration Guard
-    if: github.event.action != 'closed' && inputs.check_ef_migrations == true
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: 2. Release Please Çalıştır
+        id: release
+        uses: googleapis/release-please-action@v4
         with:
-          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          release-type: ${{ inputs.release_type }}
+          target-branch: ${{ inputs.target_branch }}
 
-      - name: Eski Migration Dosyalarını Kontrol Et
+      - name: 3. Otomatik Back-Merge (production -> staging & development)
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          MIGRATIONS_PATH="${{ inputs.migrations_path }}"
-          BASE_REF="origin/${{ github.base_ref }}"
+          echo "🔄 Yeni sürüm (${{ steps.release.outputs.tag_name }}) alt dallara eşitleniyor..."
+          
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" repo
+          cd repo
+          
+          git config user.name "cibik-release-bot[bot]"
+          git config user.email "cibik-release-bot[bot]@users.noreply.github.com"
 
-          DIFF_OUTPUT=$(git diff --name-status "$BASE_REF"...HEAD -- "$MIGRATIONS_PATH")
-
-          if [ -z "$DIFF_OUTPUT" ]; then
-            echo "✅ Migration klasöründe hiçbir değişiklik yok."
-            exit 0
-          fi
-
-          NEW_MIGRATION_ADDED=false
-          SNAPSHOT_CHANGED=false
-          VIOLATION=false
-
-          while IFS=$'\t' read -r STATUS FILE1 FILE2; do
-            if [[ "$FILE1" == *ModelSnapshot.cs ]]; then
-              SNAPSHOT_CHANGED=true
-              continue
-            fi
-            if [[ "$STATUS" == "A" ]]; then
-              if [[ "$FILE1" == *.cs && "$FILE1" != *.Designer.cs ]]; then
-                NEW_MIGRATION_ADDED=true
-              fi
+          for BRANCH in staging development; do
+            echo "👉 Hedef dal: $BRANCH"
+            git checkout "$BRANCH"
+            
+            if git merge "origin/${{ inputs.target_branch }}" --no-ff -m "chore(release): sync ${{ steps.release.outputs.tag_name }} back to ${BRANCH} [skip ci]"; then
+              git push origin "$BRANCH"
+              echo "✅ $BRANCH dalı başarıyla güncellendi!"
             else
-              echo "❌ HATA: Mevcut bir migration dosyası değiştirilemez veya silinemez: ($STATUS)$FILE1"
-              VIOLATION=true
+              echo "⚠️ $BRANCH dalında çakışma (conflict) var! Otomatik PR açılıyor..."
+              git merge --abort
+              gh pr create \
+                --base "$BRANCH" \
+                --head "${{ inputs.target_branch }}" \
+                --title "chore(release): sync ${{ steps.release.outputs.tag_name }} to ${BRANCH}" \
+                --body "Otomatik geri eşitleme sırasında çakışma tespit edildi. Lütfen çakışmayı çözerek **Create a merge commit** ile birleştirin." || echo "PR zaten mevcut"
             fi
-          done <<< "$DIFF_OUTPUT"
-
-          if [ "$SNAPSHOT_CHANGED" = true ] && [ "$NEW_MIGRATION_ADDED" = false ]; then
-            echo "❌ HATA: Yeni bir migration eklenmeden ModelSnapshot değiştirilemez!"
-            VIOLATION=true
-          fi
-
-          if [ "$VIOLATION" = true ]; then
-            exit 1
-          fi
-          echo "✅ Migration kuralları doğrulandı."
-
-  auto-delete-branch:
-    name: Geçici Feature Dalını Temizle
-    if: github.event.action == 'closed' && github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    steps:
-      - name: Ana Dal Değilse Sil
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HEAD_BRANCH: ${{ github.head_ref }}
-        run: |
-          if [[ "$HEAD_BRANCH" == "development" \vert{}\vert{} "$HEAD_BRANCH" == "staging" || "$HEAD_BRANCH" == "production" \vert{}\vert{} "$HEAD_BRANCH" == release-please--* ]]; then
-            echo "🛡️ '$HEAD_BRANCH' korumalı bir daldır, silinmeden bırakılıyor."
-            exit 0
-          fi
-
-          echo "🧹 Geçici dal siliniyor: $HEAD_BRANCH"
-          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${HEAD_BRANCH}" || true
+          done
