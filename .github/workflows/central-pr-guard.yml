@@ -24,6 +24,7 @@ jobs:
         run: echo "Release Please PR'ı doğrulamadan muaf."
 
       - name: 2. Conventional Commit PR Başlığı Kontrolü (development için)
+        id: title_check
         if: github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
         uses: amannn/action-semantic-pull-request@v5
         env:
@@ -43,17 +44,41 @@ jobs:
           requireScope: false
 
       - name: 3. PR Şablonu (Body) Kontrolü
+        id: body_check
         if: github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          if [[ ! "$PR_BODY" =~ "## Özet" ]] \vert{}\vert{} [[ ! "$PR_BODY" =~ "## Risk ve Geri Alma Planı" ]]; then
-            echo "❌ HATA: Lütfen PR şablonundaki '## Özet' ve '## Risk ve Geri Alma Planı' bölümlerini silmeden doldurun!"
+          if ! echo "$PR_BODY" | grep -q "## Özet"; then
+            echo "❌ HATA: Lütfen PR şablonundaki '## Özet' bölümünü silmeden doldurun!"
+            exit 1
+          fi
+          if ! echo "$PR_BODY" | grep -q "## Risk ve Geri Alma Planı"; then
+            echo "❌ HATA: Lütfen PR şablonundaki '## Risk ve Geri Alma Planı' bölümünü silmeden doldurun!"
             exit 1
           fi
           echo "✅ PR şablonu eksiksiz."
 
-      - name: 4. Merge Yöntemi Rehberi
+      - name: 4. Hata Varsa PR'ı Draft Yap (Merge Butonunu Kilitle)
+        if: failure() && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔒 Kontroller başarısız olduğu için PR taslak (Draft) moduna alınıyor ve merge kilitleniyor..."
+          gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} --undo || true
+
+      - name: 5. Kontroller Geçtiyse Kilidi Aç (Ready for Review)
+        if: success() && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event.pull_request.draft }}" == "true" ]; then
+            echo "🔓 Tüm kontroller başarılı! PR kilidi açılıyor..."
+            gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} || true
+          fi
+
+      - name: 6. Merge Yöntemi Rehberi
+        if: always()
         run: |
           if [ "${{ github.base_ref }}" == "development" ]; then
             echo "### 🟢 Hedef Dal: \`development\`" >> $GITHUB_STEP_SUMMARY
