@@ -17,6 +17,7 @@ on:
 jobs:
   pr-policy-check:
     name: PR Başlık ve Şablon Kontrolü
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - name: 1. Release Please Bot PR'larını Atla
@@ -64,8 +65,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "🔒 Kontroller başarısız olduğu için PR taslak (Draft) moduna alınıyor ve merge kilitleniyor..."
-          gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} --undo || true
+          echo "🔒 Kontroller başarısız olduğu için PR taslak (Draft) moduna alınıyor..."
+          gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} --undo || echo "Draft yapılamadı"
 
       - name: 5. Kontroller Geçtiyse Kilidi Aç (Ready for Review)
         if: success() && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
@@ -74,7 +75,7 @@ jobs:
         run: |
           if [ "${{ github.event.pull_request.draft }}" == "true" ]; then
             echo "🔓 Tüm kontroller başarılı! PR kilidi açılıyor..."
-            gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} || true
+            gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} || echo "Kilit açılamadı"
           fi
 
       - name: 6. Merge Yöntemi Rehberi
@@ -90,7 +91,7 @@ jobs:
 
   ef-migration-guard:
     name: EF Core Immutable Migration Guard
-    if: inputs.check_ef_migrations == true
+    if: github.event.action != 'closed' && inputs.check_ef_migrations == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -137,3 +138,24 @@ jobs:
             exit 1
           fi
           echo "✅ Migration kuralları doğrulandı."
+
+  auto-delete-branch:
+    name: Geçici Dalı Temizle
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Korumalı Ana Dal Değilse Sil
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          case "$HEAD_BRANCH" in
+            development|staging|production)
+              echo "🛡️ '$HEAD_BRANCH' korumalı ana daldır, silinmeden bırakılıyor."
+              exit 0
+              ;;
+            *)
+              echo "🧹 Birleştirilen geçici dal siliniyor: $HEAD_BRANCH"
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${HEAD_BRANCH}" || echo "Dal zaten silinmiş"
+              ;;
+          esac
