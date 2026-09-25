@@ -1,0 +1,114 @@
+name: Central PR Guard
+
+on:
+  workflow_call:
+    inputs:
+      check_ef_migrations:
+        description: 'EF Core Migration kontrolü yapılsın mı?'
+        required: false
+        type: boolean
+        default: false
+      migrations_path:
+        description: 'EF Core Migrations klasör yolu'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  pr-policy-check:
+    name: PR Başlık ve Şablon Kontrolü
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. Release Please Bot PR'larını Atla
+        if: startsWith(github.head_ref, 'release-please--')
+        run: echo "Release Please PR'ı doğrulamadan muaf."
+
+      - name: 2. Conventional Commit PR Başlığı Kontrolü (development için)
+        if: github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+
+      - name: 3. PR Şablonu (Body) Kontrolü
+        if: github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [[ ! "$PR_BODY" =~ "## Özet" ]] \vert{}\vert{} [[ ! "$PR_BODY" =~ "## Risk ve Geri Alma Planı" ]]; then
+            echo "❌ HATA: Lütfen PR şablonundaki '## Özet' ve '## Risk ve Geri Alma Planı' bölümlerini silmeden doldurun!"
+            exit 1
+          fi
+          echo "✅ PR şablonu eksiksiz."
+
+      - name: 4. Merge Yöntemi Rehberi
+        run: |
+          if [ "${{ github.base_ref }}" == "development" ]; then
+            echo "### 🟢 Hedef Dal: \`development\`" >> $GITHUB_STEP_SUMMARY
+            echo "Lütfen birleştirirken **Squash and merge** butonunu kullanın!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### 🟠 Hedef Dal: \`${{ github.base_ref }}\` (Ortam Geçişi)" >> $GITHUB_STEP_SUMMARY
+            echo "Sürüm geçmişinin (feat/fix) kaybolmaması için lütfen **Create a merge commit** butonunu kullanın! **KESİNLİKLE SQUASH YAPMAYIN!**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  ef-migration-guard:
+    name: EF Core Immutable Migration Guard
+    if: inputs.check_ef_migrations == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Eski Migration Dosyalarını Kontrol Et
+        run: |
+          MIGRATIONS_PATH="${{ inputs.migrations_path }}"
+          BASE_REF="origin/${{ github.base_ref }}"
+
+          DIFF_OUTPUT=$(git diff --name-status "$BASE_REF"...HEAD -- "$MIGRATIONS_PATH")
+
+          if [ -z "$DIFF_OUTPUT" ]; then
+            echo "✅ Migration klasöründe hiçbir değişiklik yok."
+            exit 0
+          fi
+
+          NEW_MIGRATION_ADDED=false
+          SNAPSHOT_CHANGED=false
+          VIOLATION=false
+
+          while IFS=$'\t' read -r STATUS FILE1 FILE2; do
+            if [[ "$FILE1" == *ModelSnapshot.cs ]]; then
+              SNAPSHOT_CHANGED=true
+              continue
+            fi
+            if [[ "$STATUS" == "A" ]]; then
+              if [[ "$FILE1" == *.cs && "$FILE1" != *.Designer.cs ]]; then
+                NEW_MIGRATION_ADDED=true
+              fi
+            else
+              echo "❌ HATA: Mevcut bir migration dosyası değiştirilemez veya silinemez: ($STATUS)$FILE1"
+              VIOLATION=true
+            fi
+          done <<< "$DIFF_OUTPUT"
+
+          if [ "$SNAPSHOT_CHANGED" = true ] && [ "$NEW_MIGRATION_ADDED" = false ]; then
+            echo "❌ HATA: Yeni bir migration eklenmeden ModelSnapshot değiştirilemez!"
+            VIOLATION=true
+          fi
+
+          if [ "$VIOLATION" = true ]; then
+            exit 1
+          fi
+          echo "✅ Migration kuralları doğrulandı."
