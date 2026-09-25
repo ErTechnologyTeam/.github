@@ -1,0 +1,43 @@
+name: Central Release Please
+
+on:
+  workflow_call:
+    inputs:
+      release_type:
+        description: 'Release Please stratejisi (simple veya node)'
+        required: true
+        type: string
+      target_branch:
+        description: 'Sürüm çıkarılacak hedef dal'
+        required: false
+        type: string
+        default: 'production'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  release-please:
+    name: Release Please (${{ inputs.release_type }})
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: 1. GitHub App Token Üret (cibik-release-bot)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: 2. Release Please Çalıştır
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          release-type: ${{ inputs.release_type }}
+          target-branch: ${{ inputs.target_branch }}
