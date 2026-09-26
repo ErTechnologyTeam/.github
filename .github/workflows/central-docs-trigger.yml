@@ -1,0 +1,60 @@
+# REFERANS DOSYA — ErTechnologyTeam/.github reposuna şu yolla eklenmelidir:
+#   .github/workflows/central-docs-trigger.yml
+# Kaynak repolardaki .github/workflows/trigger-docs.yml bu iş akışını çağırır
+# (org'un central-pr-guard / central-release-please düzeniyle aynı).
+#
+# Görev: kaynak repoda doküman/sürüm değiştiğinde veya release yayınlandığında
+# ErTechnologyTeam/cibik-docs reposuna repository_dispatch gönderir → cibik-docs deploy.yml çalışır.
+
+name: Central Docs Trigger
+
+on:
+  workflow_call:
+    inputs:
+      source:
+        description: "Kaynak kısa adı: backend | mobile | admin | device"
+        required: true
+        type: string
+    secrets:
+      APP_ID:
+        required: true
+      PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Notify cibik-docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: cibik-release-bot token (yalnızca cibik-docs)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.PRIVATE_KEY }}
+          owner: ErTechnologyTeam
+          repositories: cibik-docs
+
+      - name: Send repository_dispatch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Çağıran reponun olayı: release → release-published, aksi hâlde sync-from-<kaynak>
+          EVENT_TYPE: ${{ github.event_name == 'release' && 'release-published' || format('sync-from-{0}', inputs.source) }}
+          SOURCE: ${{ inputs.source }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          jq -n \
+            --arg event_type "$EVENT_TYPE" \
+            --arg source "$SOURCE" \
+            --arg repository "$REPOSITORY" \
+            --arg ref "$REF" \
+            --arg sha "$SHA" \
+            '{event_type: $event_type,
+              client_payload: {source: $source, repository: $repository, ref: $ref, sha: $sha}}' \
+          | gh api --method POST repos/ErTechnologyTeam/cibik-docs/dispatches --input -
+          echo "✓ $EVENT_TYPE → ErTechnologyTeam/cibik-docs ($REPOSITORY@$REF)" >> "$GITHUB_STEP_SUMMARY"
