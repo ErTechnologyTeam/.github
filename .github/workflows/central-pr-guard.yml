@@ -14,22 +14,28 @@ on:
         type: string
         default: ''
 
+# Tek iş (CI maliyeti): GitHub her işi en az 1 dakika sayar; eskiden 3 ayrı iş (PR politikası,
+# EF migration, dal temizliği) vardı. Şimdi hepsi tek işte adım olarak çalışır.
+# Atlanan işler ücret yazmaz: synchronize olayında (yeni commit) ve EF kontrolü kapalıyken
+# yapılacak bir şey yok, iş hiç başlamaz.
+
 jobs:
-  pr-policy-check:
-    name: PR Başlık ve Şablon Kontrolü
-    # edited: yalnız başlık, gövde ya da hedef dal değiştiyse çalışır (yorum/etiket düzenlemesi dakika harcamasın).
+  guard:
+    name: PR Kontrolleri
     if: >-
-      github.event.action != 'closed' &&
-      (github.event.action != 'edited' || github.event.changes.title || github.event.changes.body || github.event.changes.base)
+      (github.event.action == 'closed' && github.event.pull_request.merged == true) ||
+      (github.event.action == 'synchronize' && inputs.check_ef_migrations == true) ||
+      (github.event.action != 'closed' && github.event.action != 'synchronize' &&
+        (github.event.action != 'edited' || github.event.changes.title || github.event.changes.body || github.event.changes.base))
     runs-on: ubuntu-latest
     steps:
       - name: 1. Release Please Bot PR'larını Atla
-        if: startsWith(github.head_ref, 'release-please--')
+        if: github.event.action != 'closed' && startsWith(github.head_ref, 'release-please--')
         run: echo "Release Please PR'ı doğrulamadan muaf."
 
       - name: 2. Conventional Commit PR Başlığı Kontrolü (development için)
         id: title_check
-        if: github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
+        if: github.event.action != 'closed' && github.event.action != 'synchronize' && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
         uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -49,7 +55,7 @@ jobs:
 
       - name: 3. PR Şablonu (Body) Kontrolü
         id: body_check
-        if: github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
+        if: github.event.action != 'closed' && github.event.action != 'synchronize' && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
@@ -63,48 +69,18 @@ jobs:
           fi
           echo "✅ PR şablonu eksiksiz."
 
-      - name: 4. Hata Varsa PR'ı Draft Yap (Merge Butonunu Kilitle)
-        if: failure() && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "🔒 Kontroller başarısız olduğu için PR taslak (Draft) moduna alınıyor..."
-          gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} --undo || echo "Draft yapılamadı"
 
-      - name: 5. Kontroller Geçtiyse Kilidi Aç (Ready for Review)
-        if: success() && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${{ github.event.pull_request.draft }}" == "true" ]; then
-            echo "🔓 Tüm kontroller başarılı! PR kilidi açılıyor..."
-            gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} || echo "Kilit açılamadı"
-          fi
-
-      - name: 6. Merge Yöntemi Rehberi
-        if: always()
-        run: |
-          if [ "${{ github.base_ref }}" == "development" ]; then
-            echo "### 🟢 Hedef Dal: \`development\`" >> $GITHUB_STEP_SUMMARY
-            echo "Lütfen birleştirirken **Squash and merge** butonunu kullanın!" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### 🟠 Hedef Dal: \`${{ github.base_ref }}\` (Ortam Geçişi)" >> $GITHUB_STEP_SUMMARY
-            echo "Sürüm geçmişinin (feat/fix) kaybolmaması için lütfen **Create a merge commit** butonunu kullanın! **KESİNLİKLE SQUASH YAPMAYIN!**" >> $GITHUB_STEP_SUMMARY
-          fi
-
-  ef-migration-guard:
-    name: EF Core Immutable Migration Guard
-    # edited: migration farkı yalnız hedef dal değişince değişir.
-    if: >-
-      github.event.action != 'closed' && inputs.check_ef_migrations == true &&
-      (github.event.action != 'edited' || github.event.changes.base)
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/checkout@v4
+        if: >-
+          !cancelled() && github.event.action != 'closed' && inputs.check_ef_migrations == true &&
+          (github.event.action != 'edited' || github.event.changes.base)
         with:
           fetch-depth: 0
 
       - name: Eski Migration Dosyalarını Kontrol Et
+        if: >-
+          !cancelled() && github.event.action != 'closed' && inputs.check_ef_migrations == true &&
+          (github.event.action != 'edited' || github.event.changes.base)
         run: |
           MIGRATIONS_PATH="${{ inputs.migrations_path }}"
           BASE_REF="origin/${{ github.base_ref }}"
@@ -145,12 +121,37 @@ jobs:
           fi
           echo "✅ Migration kuralları doğrulandı."
 
-  auto-delete-branch:
-    name: Geçici Dalı Temizle
-    if: github.event.action == 'closed' && github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    steps:
+      - name: 4. Hata Varsa PR'ı Draft Yap (Merge Butonunu Kilitle)
+        if: failure() && github.event.action != 'closed' && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔒 Kontroller başarısız olduğu için PR taslak (Draft) moduna alınıyor..."
+          gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} --undo || echo "Draft yapılamadı"
+
+      - name: 5. Kontroller Geçtiyse Kilidi Aç (Ready for Review)
+        if: success() && github.event.action != 'closed' && github.base_ref == 'development' && !startsWith(github.head_ref, 'release-please--')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event.pull_request.draft }}" == "true" ]; then
+            echo "🔓 Tüm kontroller başarılı! PR kilidi açılıyor..."
+            gh pr ready ${{ github.event.pull_request.number }} --repo${{ github.repository }} || echo "Kilit açılamadı"
+          fi
+
+      - name: 6. Merge Yöntemi Rehberi
+        if: always() && github.event.action != 'closed' && github.event.action != 'synchronize'
+        run: |
+          if [ "${{ github.base_ref }}" == "development" ]; then
+            echo "### 🟢 Hedef Dal: \`development\`" >> $GITHUB_STEP_SUMMARY
+            echo "Lütfen birleştirirken **Squash and merge** butonunu kullanın!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### 🟠 Hedef Dal: \`${{ github.base_ref }}\` (Ortam Geçişi)" >> $GITHUB_STEP_SUMMARY
+            echo "Sürüm geçmişinin (feat/fix) kaybolmaması için lütfen **Create a merge commit** butonunu kullanın! **KESİNLİKLE SQUASH YAPMAYIN!**" >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Korumalı Ana Dal Değilse Sil
+        if: github.event.action == 'closed' && github.event.pull_request.merged == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_BRANCH: ${{ github.head_ref }}

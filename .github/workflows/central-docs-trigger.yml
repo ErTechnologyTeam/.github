@@ -1,10 +1,13 @@
-# REFERANS DOSYA — ErTechnologyTeam/.github reposuna şu yolla eklenmelidir:
-#   .github/workflows/central-docs-trigger.yml
-# Kaynak repolardaki .github/workflows/trigger-docs.yml bu iş akışını çağırır
-# (org'un central-pr-guard / central-release-please düzeniyle aynı).
+# KULLANIMDAN KALDIRILDI (CI maliyeti).
 #
-# Görev: kaynak repoda doküman/sürüm değiştiğinde veya release yayınlandığında
-# ErTechnologyTeam/cibik-docs reposuna repository_dispatch gönderir → cibik-docs deploy.yml çalışır.
+# Eskiden kaynak repolardaki trigger-docs.yml bu iş akışını çağırır, o da ErTechnologyTeam/cibik-docs'a
+# repository_dispatch gönderirdi (her push'ta docs yeniden derleniyordu). Artık cibik-docs "Deploy Docs"
+# günde bir kez (gece 03:00 TR) ve elle çalışır; kaynak repoları baştan çekip her ortam dalını okur,
+# yani değişiklikler kendiliğinden birikir.
+#
+# Bu dosya yalnız staging/production dallarındaki eski trigger-docs.yml kopyaları (henüz promosyonla
+# kalkmadı) hata vermesin diye duruyor. İş her zaman atlanır, atlanan iş ücret yazmaz.
+# Tüm dallardan trigger-docs.yml kalkınca bu dosya da silinebilir.
 
 name: Central Docs Trigger
 
@@ -12,72 +15,22 @@ on:
   workflow_call:
     inputs:
       source:
-        description: "Kaynak kısa adı: backend | mobile | admin | device"
-        required: true
+        description: "Kullanılmıyor (geriye dönük uyumluluk)"
+        required: false
         type: string
     secrets:
       APP_ID:
-        required: true
+        required: false
       PRIVATE_KEY:
-        required: true
+        required: false
 
 permissions:
   contents: read
 
 jobs:
-  dispatch:
-    name: Notify cibik-docs
+  deprecated:
+    name: Kullanımdan kaldırıldı
+    if: false
     runs-on: ubuntu-latest
     steps:
-      - name: cibik-release-bot token (yalnızca cibik-docs)
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.PRIVATE_KEY }}
-          owner: ErTechnologyTeam
-          repositories: cibik-docs
-
-      # Dakika tasarrufu: cibik-docs son 1 saat içinde zaten derlendiyse (ya da derleniyorsa) sinyal
-      # gönderilmez; değişiklik bir sonraki sinyalde ya da cibik-docs'un gece derlemesinde yayına girer.
-      # Release sinyalleri her zaman gider. API okunamazsa (izin yoksa) sinyal gönderilir.
-      - name: Throttle (son derlemeden 1 saat geçmediyse atla)
-        id: throttle
-        if: github.event_name != 'release'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          LAST=$(gh api "repos/ErTechnologyTeam/cibik-docs/actions/workflows/deploy.yml/runs?per_page=10" \
-            --jq '[.workflow_runs[] | select(.conclusion != "cancelled" and .conclusion != "failure")][0].created_at // empty' 2>/dev/null || true)
-          if [ -z "$LAST" ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          AGE=$(( $(date -u +%s) - $(date -u -d "$LAST" +%s) ))
-          if [ "$AGE" -lt 3600 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "⏭️ cibik-docs $((AGE / 60)) dk önce derlendi; sinyal atlandı (gece derlemesi ya da sonraki sinyal yayınlar)." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Send repository_dispatch
-        if: steps.throttle.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          # Çağıran reponun olayı: release → release-published, aksi hâlde sync-from-<kaynak>
-          EVENT_TYPE: ${{ github.event_name == 'release' && 'release-published' || format('sync-from-{0}', inputs.source) }}
-          SOURCE: ${{ inputs.source }}
-          REPOSITORY: ${{ github.repository }}
-          REF: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
-        run: |
-          jq -n \
-            --arg event_type "$EVENT_TYPE" \
-            --arg source "$SOURCE" \
-            --arg repository "$REPOSITORY" \
-            --arg ref "$REF" \
-            --arg sha "$SHA" \
-            '{event_type: $event_type,
-              client_payload: {source: $source, repository: $repository, ref: $ref, sha: $sha}}' \
-          | gh api --method POST repos/ErTechnologyTeam/cibik-docs/dispatches --input -
-          echo "✓ $EVENT_TYPE → ErTechnologyTeam/cibik-docs ($REPOSITORY@$REF)" >> "$GITHUB_STEP_SUMMARY"
+      - run: echo "Docs dağıtımı artık günde bir kez (cibik-docs schedule)."
